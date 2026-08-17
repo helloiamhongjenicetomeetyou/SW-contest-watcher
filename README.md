@@ -133,3 +133,7 @@ DeptBoard(
   }
 }
 ```
+
+---
+
+원본: https://github.com/wlstmd/kmu-scholarship-watcher
