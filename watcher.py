@@ -1,18 +1,22 @@
 """
-울산대학교 공지 게시판을 감시해서 장학 관련 공고가 새로 올라오면 이메일로 알려주는 스크립트.
+울산대학교 공지를 감시해서 새 장학 공고·대회 공고가 올라오면 이메일로 알려주는 스크립트.
 
 울산대에는 장학 공고만 모아둔 공개 게시판이 없다. 교내장학 공고는
-UWINS(로그인 필요) 안쪽에 있고, 밖에서 볼 수 있는 건 두 갈래다.
+UWINS(로그인 필요) 안쪽에 있고, 밖에서 볼 수 있는 건 세 갈래다.
 
-  1. 대표 홈페이지 일반공지 - 국가장학금·국가근로, 교외 재단장학 공고가 올라온다.
-     이 게시판은 제목 검색이 GET으로 동작하므로 키워드로 바로 질의한다.
-  2. ICT융합학부 공지 - 학부 우수장학·봉사장학처럼 대표 홈페이지에 안 올라오는
-     공고가 여기에만 있다. 검색이 없어서 최근 페이지를 훑어 제목을 맞춰본다.
+  1. 대표 홈페이지 일반공지 - 국가장학금·국가근로, 교외 재단장학 공고.
+     제목 검색이 GET으로 동작하므로 키워드로 바로 질의한다.
+  2. ICT융합학부 공지 - 학부 우수장학·봉사장학처럼 대표 홈페이지에 안 올라오는 공고.
+     검색이 없어서 최근 페이지를 훑어 제목을 맞춰본다.
+  3. SW중심대학사업단 공지 - 해커톤·경진대회·공모전. 여기만 학교 전산망 밖
+     (CloudFront + 외부 CMS)이라 공개 JSON API로 깔끔하게 가져온다.
+
+게시판마다 찾는 게 다르다. 1·2번은 장학, 3번은 대회를 본다.
 
 동작 방식:
 1. 각 게시판에서 후보 글 목록을 모은다.
-2. 제목에 TARGET_KEYWORDS 중 하나가 들어 있고 state/seen.json에 없는 글이면
-   상세 페이지를 읽어 본문 전체·작성일·첨부파일을 가져온다.
+2. 제목이 그 게시판의 키워드에 걸리고 state/seen.json에 없는 글이면
+   상세 페이지를 읽어 본문·작성일·첨부파일을 가져온다.
 3. 이메일로 발송하고 글 번호를 state/seen.json에 기록한다.
 
 게시판을 처음 감시할 때는(= state에 그 게시판 기록이 없을 때) 메일을 보내지 않고
@@ -44,13 +48,15 @@ TIMEOUT = (15, 30)
 # (Connection refused). 2시간에 한 번 도는 작업이라 느긋하게 간다.
 REQUEST_DELAY = 3.0
 
-# 제목에 이 중 하나라도 들어 있으면 알림 대상.
+# 장학 게시판(대표 홈페이지·학부)에서 찾을 말.
 # 특정 장학금만 받고 싶으면 여기를 이름으로 바꾼다. 예) ["우수장학", "국가근로장학"]
-TARGET_KEYWORDS = ["장학"]
+SCHOLARSHIP_KEYWORDS = ["장학"]
 
-# 위 키워드에 걸려도 제목에 이 단어가 있으면 거른다.
-# 신청과 무관한 글(예: "[한국장학재단] 공공데이터 개방 목록 안내")이 자꾸 오면 여기에 추가한다.
-EXCLUDE_KEYWORDS: list[str] = []
+# SW중심대학사업단 게시판에서 찾을 말.
+CONTEST_KEYWORDS = ["대회", "공모전", "해커톤", "경진", "챌린지", "challenge"]
+
+# 대회 키워드에 걸려도 이미 끝난 소식은 뺀다. 남의 수상 소식까지 받을 이유는 없다.
+CONTEST_EXCLUDE = ["수상자", "명단", "최종 결과", "결과 안내"]
 
 HEADERS = {
     "User-Agent": (
@@ -67,13 +73,13 @@ def _clean(text: str) -> str:
 
 def _normalize(text: str) -> str:
     """키워드 비교용. 띄어쓰기 차이를 무시하려고 공백을 전부 없앤다."""
-    return re.sub(r"\s+", "", text)
+    return re.sub(r"\s+", "", text).lower()
 
 
 def _build_session() -> requests.Session:
     """
     연결을 재사용하는 세션. 매 요청마다 TCP 연결을 새로 열면 학교 서버가
-    도중에 연결을 안 받아줘서 ConnectTimeout이 난다(러너 IP 기준 제한으로 보인다).
+    도중에 연결을 안 받아줘서 ConnectTimeout·Connection refused가 난다.
     keep-alive로 연결을 붙들고, 그래도 실패하면 간격을 늘려가며 재시도한다.
     """
     session = requests.Session()
@@ -93,11 +99,15 @@ def _build_session() -> requests.Session:
 SESSION = _build_session()
 
 
-def _get(url: str, params: dict) -> BeautifulSoup:
-    resp = SESSION.get(url, params=params, timeout=TIMEOUT)
+def _fetch(url: str, params: dict | None = None, headers: dict | None = None):
+    resp = SESSION.get(url, params=params, headers=headers, timeout=TIMEOUT)
     resp.raise_for_status()
     time.sleep(REQUEST_DELAY)
-    return BeautifulSoup(resp.text, "html.parser")
+    return resp
+
+
+def _get(url: str, params: dict) -> BeautifulSoup:
+    return BeautifulSoup(_fetch(url, params).text, "html.parser")
 
 
 def _body_text(element) -> str:
@@ -107,7 +117,33 @@ def _body_text(element) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
-class UnivBoard:
+class Board:
+    """
+    감시 대상 게시판의 공통 부분.
+
+    게시판마다 찾는 게 다르므로 키워드를 각자 들고 있다.
+    """
+
+    def __init__(self, board_id: str, name: str, tag: str, keywords: list[str],
+                 exclude: list[str] | None = None):
+        self.board_id = board_id
+        self.name = name
+        self.tag = tag  # 메일 제목 앞에 붙는 말
+        self.keywords = list(keywords)
+        self.exclude = list(exclude or [])
+
+    def matches(self, title: str) -> str | None:
+        """제목이 이 게시판의 키워드에 걸리면 그 키워드를, 아니면 None을 돌려준다."""
+        normalized = _normalize(title)
+        if any(_normalize(word) in normalized for word in self.exclude):
+            return None
+        for keyword in self.keywords:
+            if _normalize(keyword) in normalized:
+                return keyword
+        return None
+
+
+class UnivBoard(Board):
     """
     대표 홈페이지 CMS 게시판(www.ulsan.ac.kr/kor/CMS/Board/Board.do).
 
@@ -115,10 +151,8 @@ class UnivBoard:
     페이지를 훑는 방식과 달리 공지가 한꺼번에 몰려도 놓치지 않는다.
     """
 
-    def __init__(self, board_id: str, name: str, tag: str, mcode: str, mgr_seq: str):
-        self.board_id = board_id
-        self.name = name
-        self.tag = tag
+    def __init__(self, mcode: str, mgr_seq: str, **kwargs):
+        super().__init__(**kwargs)
         self.mcode = mcode
         self.mgr_seq = mgr_seq
         self.base_url = "https://www.ulsan.ac.kr/kor/CMS/Board/Board.do"
@@ -129,9 +163,9 @@ class UnivBoard:
             f"&mgr_seq={self.mgr_seq}&board_seq={post_id}"
         )
 
-    def fetch_candidates(self, keywords: list[str]) -> dict[str, dict]:
+    def fetch_candidates(self) -> dict[str, dict]:
         candidates: dict[str, dict] = {}
-        for keyword in keywords:
+        for keyword in self.keywords:
             soup = _get(self.base_url, {
                 "mCode": self.mcode,
                 "mode": "list",
@@ -185,7 +219,7 @@ class UnivBoard:
         }
 
 
-class DeptBoard:
+class DeptBoard(Board):
     """
     학과 홈페이지 게시판(ict.ulsan.ac.kr 계열, ?action=view&no=...).
 
@@ -193,19 +227,15 @@ class DeptBoard:
     같은 CMS를 쓰는 다른 학부 사이트는 board_url만 바꾸면 그대로 붙는다.
     """
 
-    def __init__(
-        self, board_id: str, name: str, tag: str, board_url: str, pages_to_check: int = 2
-    ):
-        self.board_id = board_id
-        self.name = name
-        self.tag = tag
+    def __init__(self, board_url: str, pages_to_check: int = 2, **kwargs):
+        super().__init__(**kwargs)
         self.board_url = board_url.rstrip("/")
         self.pages_to_check = pages_to_check
 
     def post_url(self, post_id: str) -> str:
         return f"{self.board_url}?action=view&no={post_id}"
 
-    def fetch_candidates(self, keywords: list[str]) -> dict[str, dict]:
+    def fetch_candidates(self) -> dict[str, dict]:
         candidates: dict[str, dict] = {}
         for page in range(1, self.pages_to_check + 1):
             soup = _get(self.board_url, {"pageIndex": page})
@@ -254,11 +284,76 @@ class DeptBoard:
         }
 
 
+class SwBoard(Board):
+    """
+    SW중심대학사업단 공지(sw.ulsan.ac.kr).
+
+    이 사이트만 학교 전산망 밖에 있다. 화면은 CloudFront에서 오고 게시판 데이터는
+    외부 CMS(didisam)의 공개 JSON API로 나온다. 그래서 학교 서버처럼 요청을
+    거절당하지 않고, 목록 한 번이면 제목·작성일·글번호가 전부 온다.
+
+    HTML을 긁는 게 아니라 API를 부르므로 사이트 화면이 바뀌어도 잘 안 깨진다.
+    """
+
+    API_BASE = "https://prd-community.didisam.com/api/v3/sampage/notice"
+    SITE_BASE = "https://sw.ulsan.ac.kr/site"
+
+    def __init__(self, slug: str = "swulsan", page_size: int = 20, **kwargs):
+        super().__init__(**kwargs)
+        self.slug = slug
+        self.page_size = page_size
+
+    def post_url(self, post_id: str) -> str:
+        return f"{self.SITE_BASE}/{self.slug}/notices/{post_id}"
+
+    def _api(self, path: str = "", params: dict | None = None) -> dict:
+        # 어느 사이트의 게시판인지는 헤더의 slug로 가른다.
+        resp = _fetch(f"{self.API_BASE}{path}", params=params, headers={"slug": self.slug})
+        return resp.json()["result"]
+
+    def fetch_candidates(self) -> dict[str, dict]:
+        result = self._api("/community", {"page_size": self.page_size, "page": 1})
+
+        candidates: dict[str, dict] = {}
+        for row in result.get("data", []):
+            post_id = str(row["notice_id"])
+            # 상단 고정 공지는 목록에 두 번 나오므로 글 번호로 덮어쓴다.
+            candidates[post_id] = {
+                "post_id": post_id,
+                "title": _clean(row.get("title", "")),
+                "date": (row.get("insert_date") or "")[:10],
+            }
+        return candidates
+
+    def fetch_detail(self, post_id: str) -> dict:
+        row = self._api(f"/{post_id}")
+
+        content = _body_text(BeautifulSoup(row.get("contents") or "", "html.parser"))
+        if not content.strip():
+            # 포스터 이미지 한 장만 올라온 공지가 흔하다.
+            content = "(본문이 이미지로만 되어 있습니다. 링크에서 확인하세요.)"
+
+        attachments = [
+            _clean(f.get("attachment_title", "")) for f in (row.get("attachment") or [])
+        ]
+
+        return {
+            "title": _clean(row.get("title", "")),
+            "category": "",
+            "writer": _clean(row.get("nick_name") or ""),
+            "date": (row.get("insert_date") or "")[:10],
+            "content": content,
+            "attachments": attachments,
+            "url": self.post_url(post_id),
+        }
+
+
 BOARDS = [
     UnivBoard(
         board_id="univ-notice",
         name="울산대학교 일반공지",
         tag="울산대 장학",
+        keywords=SCHOLARSHIP_KEYWORDS,
         mcode="MN113",
         mgr_seq="35",
     ),
@@ -266,7 +361,15 @@ BOARDS = [
         board_id="ict-notice",
         name="ICT융합학부 공지사항",
         tag="ICT 장학",
+        keywords=SCHOLARSHIP_KEYWORDS,
         board_url="https://ict.ulsan.ac.kr/ict/5778",
+    ),
+    SwBoard(
+        board_id="sw-notice",
+        name="SW중심대학사업단 공지",
+        tag="SW 대회",
+        keywords=CONTEST_KEYWORDS,
+        exclude=CONTEST_EXCLUDE,
     ),
 ]
 
@@ -284,16 +387,6 @@ def save_state(state: dict[str, set]) -> None:
     STATE_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-
-
-def matches_target(title: str) -> str | None:
-    normalized = _normalize(title)
-    if any(_normalize(word) in normalized for word in EXCLUDE_KEYWORDS):
-        return None
-    for keyword in TARGET_KEYWORDS:
-        if _normalize(keyword) in normalized:
-            return keyword
-    return None
 
 
 def format_body(item: dict) -> str:
@@ -327,7 +420,7 @@ def send_email(items: list[dict]) -> None:
     email_pass = os.environ["EMAIL_PASS"]
     email_to = os.environ.get("EMAIL_TO", email_user)
 
-    with smtplib.SMTP(smtp_host, smtp_port, timeout=TIMEOUT) as server:
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
         server.starttls()
         server.login(email_user, email_pass)
 
@@ -340,11 +433,11 @@ def send_email(items: list[dict]) -> None:
             print(f"메일 발송 완료: {item['title']}")
 
 
-def _detail_from_list_row(board, post_id: str, row: dict) -> dict:
+def _detail_from_list_row(board: Board, post_id: str, row: dict) -> dict:
     """
     상세 페이지를 못 읽었을 때 목록에서 아는 것만으로 만든 대체 항목.
 
-    본문이 없어도 '새 장학 공고가 떴다 + 링크'는 전달돼야 알림 노릇을 한다.
+    본문이 없어도 '새 공고가 떴다 + 링크'는 전달돼야 알림 노릇을 한다.
     """
     return {
         "title": row["title"],
@@ -357,14 +450,14 @@ def _detail_from_list_row(board, post_id: str, row: dict) -> dict:
     }
 
 
-def collect_new_items(board, seen: set, with_details: bool = True) -> tuple[list[dict], set]:
+def collect_new_items(board: Board, seen: set, with_details: bool = True) -> tuple[list[dict], set]:
     """
     게시판에서 알림 보낼 글과, 이번에 확인한 전체 글 번호를 돌려준다.
 
     with_details=False면 목록만 읽고 상세 페이지는 건너뛴다. 최초 감시 때는
-    어차피 메일을 안 보내므로 요청 수를 목록 몇 번으로 줄이려고 쓴다.
+    어차피 메일을 안 보내므로 요청 수를 줄이려고 쓴다.
     """
-    candidates = board.fetch_candidates(TARGET_KEYWORDS)
+    candidates = board.fetch_candidates()
     if not with_details:
         return [], set(candidates)
 
@@ -376,7 +469,7 @@ def collect_new_items(board, seen: set, with_details: bool = True) -> tuple[list
     for post_id, row in candidates.items():
         if post_id in seen:
             continue
-        keyword = matches_target(row["title"])
+        keyword = board.matches(row["title"])
         if not keyword:
             continue
 
@@ -409,7 +502,7 @@ def collect_new_items(board, seen: set, with_details: bool = True) -> tuple[list
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="울산대 장학 공지 감시")
+    parser = argparse.ArgumentParser(description="울산대 장학·대회 공지 감시")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -442,10 +535,10 @@ def main() -> None:
             continue
 
         if not new_items:
-            print(f"[{board.name}] 새로운 장학 공지가 없습니다.")
+            print(f"[{board.name}] 새로운 공지가 없습니다.")
             continue
 
-        print(f"[{board.name}] 새 장학 공지 {len(new_items)}건")
+        print(f"[{board.name}] 새 공지 {len(new_items)}건")
         items_to_send.extend(new_items)
 
     if args.dry_run:
