@@ -197,7 +197,13 @@ def send_email(items: list[dict]) -> None:
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     email_user = os.environ["EMAIL_USER"]
     email_pass = os.environ["EMAIL_PASS"]
-    email_to = os.environ.get("EMAIL_TO", email_user)
+
+    # EMAIL_TO는 쉼표로 여러 개를 적을 수 있다. 예) 학교 메일, 개인 메일
+    recipients = [
+        addr.strip()
+        for addr in os.environ.get("EMAIL_TO", email_user).split(",")
+        if addr.strip()
+    ] or [email_user]
 
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
         server.starttls()
@@ -207,9 +213,9 @@ def send_email(items: list[dict]) -> None:
             msg = MIMEText(format_body(item), "plain", "utf-8")
             msg["Subject"] = Header(f"[SW 공지] {item['title']}", "utf-8")
             msg["From"] = email_user
-            msg["To"] = email_to
-            server.sendmail(email_user, [email_to], msg.as_string())
-            print(f"메일 발송 완료: {item['title']}")
+            msg["To"] = ", ".join(recipients)
+            server.sendmail(email_user, recipients, msg.as_string())
+            print(f"메일 발송 완료: {item['title']} → {', '.join(recipients)}")
 
 
 def main() -> None:
