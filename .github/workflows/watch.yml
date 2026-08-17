@@ -1,0 +1,43 @@
+name: UOU Scholarship Watcher
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: uou-scholarship-watcher
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run watcher
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python watcher.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "uou-scholarship-watcher-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/
+          git diff --cached --quiet || git commit -m "chore: update seen scholarship notices"
+          git push
