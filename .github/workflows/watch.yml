@@ -34,10 +34,37 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: python watcher.py
 
+      # 이 작업이 도는 동안 다른 실행이나 사람이 먼저 푸시하면 푸시가 거절된다.
+      # 그때는 원격 state와 이번 state를 합쳐서 원격 위에 새로 올린다.
+      # 합치지 않고 덮어쓰면 이미 보낸 글이 되살아나 메일이 두 번 간다.
       - name: Commit updated state
         run: |
           git config user.name "uou-scholarship-watcher-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add state/
-          git diff --cached --quiet || git commit -m "chore: update seen scholarship notices"
-          git push
+
+          for attempt in 1 2 3; do
+            git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+
+            python scripts/merge_state.py "$RUNNER_TEMP/seen.json"
+            git reset --quiet --hard origin/main
+            mkdir -p state
+            mv "$RUNNER_TEMP/seen.json" state/seen.json
+
+            git add state/seen.json
+            if git diff --cached --quiet; then
+              echo "state에 바뀐 게 없습니다."
+              exit 0
+            fi
+
+            git commit --quiet -m "chore: update seen scholarship notices"
+            if git push --quiet origin HEAD:main; then
+              echo "state 커밋 완료."
+              exit 0
+            fi
+
+            echo "누가 먼저 푸시했습니다. 다시 시도합니다. ($attempt/3)"
+            sleep 5
+          done
+
+          echo "state를 커밋하지 못했습니다."
+          exit 1
