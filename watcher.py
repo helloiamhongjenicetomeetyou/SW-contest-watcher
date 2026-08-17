@@ -24,15 +24,24 @@ import json
 import os
 import re
 import smtplib
+import time
 from email.header import Header
 from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 STATE_FILE = Path(__file__).parent / "state" / "seen.json"
-TIMEOUT = 20
+
+# (연결, 응답) 타임아웃. GitHub Actions 러너(미국)에서 국내 서버로 붙을 때
+# 연결이 느리게 잡히는 일이 있어 연결 쪽을 넉넉히 준다.
+TIMEOUT = (15, 30)
+
+# 요청 사이 간격. 짧은 시간에 몰아치면 학교 서버가 연결을 안 받아준다.
+REQUEST_DELAY = 1.0
 
 # 제목에 이 중 하나라도 들어 있으면 알림 대상.
 # 특정 장학금만 받고 싶으면 여기를 이름으로 바꾼다. 예) ["우수장학", "국가근로장학"]
@@ -60,9 +69,33 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _build_session() -> requests.Session:
+    """
+    연결을 재사용하는 세션. 매 요청마다 TCP 연결을 새로 열면 학교 서버가
+    도중에 연결을 안 받아줘서 ConnectTimeout이 난다(러너 IP 기준 제한으로 보인다).
+    keep-alive로 연결을 붙들고, 그래도 실패하면 간격을 늘려가며 재시도한다.
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        backoff_factor=3,  # 재시도 간격 3초 → 6초 → 12초
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
+
+
+SESSION = _build_session()
+
+
 def _get(url: str, params: dict) -> BeautifulSoup:
-    resp = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
+    resp = SESSION.get(url, params=params, timeout=TIMEOUT)
     resp.raise_for_status()
+    time.sleep(REQUEST_DELAY)
     return BeautifulSoup(resp.text, "html.parser")
 
 
@@ -306,9 +339,16 @@ def send_email(items: list[dict]) -> None:
             print(f"메일 발송 완료: {item['title']}")
 
 
-def collect_new_items(board, seen: set) -> tuple[list[dict], set]:
-    """게시판에서 알림 보낼 글과, 이번에 확인한 전체 글 번호를 돌려준다."""
+def collect_new_items(board, seen: set, with_details: bool = True) -> tuple[list[dict], set]:
+    """
+    게시판에서 알림 보낼 글과, 이번에 확인한 전체 글 번호를 돌려준다.
+
+    with_details=False면 목록만 읽고 상세 페이지는 건너뛴다. 최초 감시 때는
+    어차피 메일을 안 보내므로 요청 수를 목록 몇 번으로 줄이려고 쓴다.
+    """
     candidates = board.fetch_candidates(TARGET_KEYWORDS)
+    if not with_details:
+        return [], set(candidates)
 
     new_items = []
     for post_id, row in candidates.items():
@@ -351,7 +391,7 @@ def main() -> None:
 
         # 한쪽 게시판이 죽어도 나머지는 확인하고, 대신 마지막에 종료 코드를 1로 낸다.
         try:
-            new_items, all_ids = collect_new_items(board, seen)
+            new_items, all_ids = collect_new_items(board, seen, with_details=not first_run)
         except Exception as exc:  # noqa: BLE001 - 어떤 실패든 로그만 남기고 계속한다
             print(f"[{board.name}] 수집 실패: {type(exc).__name__}: {exc}")
             failures.append(board.name)
