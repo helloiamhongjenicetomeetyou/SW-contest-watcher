@@ -40,8 +40,9 @@ STATE_FILE = Path(__file__).parent / "state" / "seen.json"
 # 연결이 느리게 잡히는 일이 있어 연결 쪽을 넉넉히 준다.
 TIMEOUT = (15, 30)
 
-# 요청 사이 간격. 짧은 시간에 몰아치면 학교 서버가 연결을 안 받아준다.
-REQUEST_DELAY = 1.0
+# 요청 사이 간격. 학교 서버는 짧은 시간에 요청이 몰리면 연결 자체를 거절한다
+# (Connection refused). 2시간에 한 번 도는 작업이라 느긋하게 간다.
+REQUEST_DELAY = 3.0
 
 # 제목에 이 중 하나라도 들어 있으면 알림 대상.
 # 특정 장학금만 받고 싶으면 여기를 이름으로 바꾼다. 예) ["우수장학", "국가근로장학"]
@@ -339,6 +340,23 @@ def send_email(items: list[dict]) -> None:
             print(f"메일 발송 완료: {item['title']}")
 
 
+def _detail_from_list_row(board, post_id: str, row: dict) -> dict:
+    """
+    상세 페이지를 못 읽었을 때 목록에서 아는 것만으로 만든 대체 항목.
+
+    본문이 없어도 '새 장학 공고가 떴다 + 링크'는 전달돼야 알림 노릇을 한다.
+    """
+    return {
+        "title": row["title"],
+        "category": "",
+        "writer": "",
+        "date": row["date"],
+        "content": "(학교 서버 접속이 막혀 본문을 가져오지 못했습니다. 위 링크에서 확인하세요.)",
+        "attachments": [],
+        "url": board.post_url(post_id),
+    }
+
+
 def collect_new_items(board, seen: set, with_details: bool = True) -> tuple[list[dict], set]:
     """
     게시판에서 알림 보낼 글과, 이번에 확인한 전체 글 번호를 돌려준다.
@@ -351,13 +369,31 @@ def collect_new_items(board, seen: set, with_details: bool = True) -> tuple[list
         return [], set(candidates)
 
     new_items = []
+    # 본문 수집이 한 번 막히면 그 회차에는 더 두드리지 않는다. 막힌 뒤에도 계속
+    # 요청하면 차단만 길어지고, 어차피 링크는 목록에서 이미 알고 있다.
+    detail_blocked = False
+
     for post_id, row in candidates.items():
         if post_id in seen:
             continue
         keyword = matches_target(row["title"])
         if not keyword:
             continue
-        detail = board.fetch_detail(post_id)
+
+        detail = None
+        if not detail_blocked:
+            try:
+                detail = board.fetch_detail(post_id)
+            except requests.RequestException as exc:
+                detail_blocked = True
+                print(
+                    f"[{board.name}] 본문을 못 읽었습니다({post_id}): "
+                    f"{type(exc).__name__}. 제목과 링크만 넣어 보냅니다."
+                )
+
+        if detail is None:
+            detail = _detail_from_list_row(board, post_id, row)
+
         detail.update(
             keyword=keyword,
             post_id=post_id,
