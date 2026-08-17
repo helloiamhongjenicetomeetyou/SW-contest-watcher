@@ -3,12 +3,13 @@
 울산대학교 공지 게시판에 **장학 관련 공고가 새로 올라오면 이메일로** 보내줍니다.
 GitHub Actions가 2시간마다 돌기 때문에 컴퓨터를 켜둘 필요도, 서버를 띄울 필요도 없습니다.
 
-[wlstmd/kmu-scholarship-watcher](https://github.com/wlstmd/kmu-scholarship-watcher)(계명대 버전)를
-울산대 게시판 구조에 맞춰 다시 만든 것입니다.
+[wlstmd/kmu-scholarship-watcher](https://github.com/wlstmd/kmu-scholarship-watcher)를
+가져와 울산대 게시판 구조에 맞게 고친 것입니다. 게시판 수집 부분은 새로 썼고,
+메일 발송과 GitHub Actions 구성은 원본을 그대로 따랐습니다.
 
 ## 울산대는 장학 게시판이 하나가 아닙니다
 
-계명대는 `열린마당 > 공지사항 > 장학` 게시판 하나만 보면 됐지만, 울산대는 그런 게 없습니다.
+울산대에는 장학 공고만 모아둔 공개 게시판이 없습니다.
 교내장학 공고는 **UWINS 로그인 안쪽**에 있고, 밖에서 볼 수 있는 건 두 갈래로 나뉩니다.
 
 | 감시 대상 | 여기에만 올라오는 것 | 수집 방식 |
@@ -62,7 +63,7 @@ Gmail이 아니면 워크플로에 `SMTP_HOST`, `SMTP_PORT`를 넣어 바꿀 수
 
 ## GitHub Actions에 대해
 
-[`.github/workflows/watch.yml`](.github/workflows/watch.yml)이 전부입니다. 원본 계명대 버전과 같은 방식입니다.
+[`.github/workflows/watch.yml`](.github/workflows/watch.yml)이 전부입니다. 원본과 같은 방식입니다.
 
 ```yaml
 on:
@@ -144,14 +145,3 @@ DeptBoard(
   }
 }
 ```
-
-## 계명대 버전과 달라진 점
-
-| | 계명대 | 울산대 |
-| --- | --- | --- |
-| 게시판 | 장학 게시판 1개 | 일반공지 + 학부 공지 2개 (구조가 서로 다름) |
-| 수집 | 목록 2페이지 훑기 | 대표는 제목 검색, 학부는 페이지 훑기 |
-| 최초 실행 | 전체 1회 | 게시판별로 각각 판단 |
-| state | `seen_ids` 배열 하나 | 게시판별로 분리 |
-| TLS | 중간 인증서를 직접 붙여야 함 | 필요 없음 (체인 정상) |
-| 기타 | | `--dry-run`, 게시판 하나가 죽어도 나머지는 계속 |
