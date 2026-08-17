@@ -1,17 +1,5 @@
 # 울산대 장학 공지 알리미
 
-울산대학교 공지 게시판에 **장학 관련 공고가 새로 올라오면 이메일로** 보내줍니다.
-GitHub Actions가 2시간마다 돌기 때문에 컴퓨터를 켜둘 필요도, 서버를 띄울 필요도 없습니다.
-
-[wlstmd/kmu-scholarship-watcher](https://github.com/wlstmd/kmu-scholarship-watcher)를
-가져와 울산대 게시판 구조에 맞게 고친 것입니다. 게시판 수집 부분은 새로 썼고,
-메일 발송과 GitHub Actions 구성은 원본을 그대로 따랐습니다.
-
-## 울산대는 장학 게시판이 하나가 아닙니다
-
-울산대에는 장학 공고만 모아둔 공개 게시판이 없습니다.
-교내장학 공고는 **UWINS 로그인 안쪽**에 있고, 밖에서 볼 수 있는 건 두 갈래로 나뉩니다.
-
 | 감시 대상 | 여기에만 올라오는 것 | 수집 방식 |
 | --- | --- | --- |
 | [대표 홈페이지 일반공지](https://www.ulsan.ac.kr/kor/CMS/Board/Board.do?mCode=MN113) | 국가장학금·국가근로장학, 손태희·세종이도 같은 교외 재단장학 | 게시판 **제목 검색**이 GET으로 열려서 키워드로 바로 질의 |
@@ -63,7 +51,7 @@ Gmail이 아니면 워크플로에 `SMTP_HOST`, `SMTP_PORT`를 넣어 바꿀 수
 
 ## GitHub Actions에 대해
 
-[`.github/workflows/watch.yml`](.github/workflows/watch.yml)이 전부입니다. 원본과 같은 방식입니다.
+[`.github/workflows/watch.yml`](.github/workflows/watch.yml)이 전부입니다.
 
 ```yaml
 on:
