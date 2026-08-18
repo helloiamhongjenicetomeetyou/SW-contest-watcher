@@ -67,6 +67,18 @@ TARGET_KEYWORDS = [
 # 위 키워드에 걸려도 이미 끝난 소식은 뺀다. 남의 수상 소식까지 받을 이유는 없다.
 EXCLUDE_KEYWORDS = ["수상자", "명단", "최종 결과", "결과 안내", "개최 취소"]
 
+# 대표 홈페이지에는 교외 기관 공고가 그대로 올라와서 '한우 곤포 나르기 대회',
+# '댄스 경연대회' 같은 것까지 섞인다. 그래서 그 게시판만 대회 단어에 더해
+# 이 중 하나가 제목에 있어야 알림을 보낸다. SW사업단 게시판은 전부 SW 대회라 안 건다.
+SW_KEYWORDS = [
+    "ai", "인공지능", "sw", "소프트웨어", "프로그래밍", "코딩", "코테",
+    "해커톤", "hackathon", "데이터", "빅데이터", "알고리즘",
+    "앱", "애플리케이션", "웹", "ict", "디지털", "정보통신", "전산",
+    "로봇", "자율주행", "임베디드", "드론", "반도체",
+    "정보보호", "보안", "클라우드", "블록체인", "메타버스", "가상현실", "vr",
+    "게임", "챗봇", "머신러닝", "딥러닝", "캡스톤", "오픈소스", "사물인터넷", "iot",
+]
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -83,6 +95,19 @@ def _clean(text: str) -> str:
 def _normalize(text: str) -> str:
     """키워드 비교용. 띄어쓰기 차이를 무시하려고 공백을 전부 없앤다."""
     return re.sub(r"\s+", "", text).lower()
+
+
+def _contains(title: str, keyword: str) -> bool:
+    """
+    제목에 키워드가 들어 있는지 본다.
+
+    한글은 띄어쓰기를 무시하고 찾는다("국가 근로" == "국가근로").
+    영문·숫자만인 키워드는 단어 단위로 찾는다. 그냥 부분 문자열로 찾으면
+    'it'이 'digital'에, 'ar'이 'start'에 걸려서 엉뚱한 글이 딸려온다.
+    """
+    if re.fullmatch(r"[a-z0-9]+", keyword):
+        return re.search(rf"\b{re.escape(keyword)}\b", title.lower()) is not None
+    return _normalize(keyword) in _normalize(title)
 
 
 def _build_session() -> requests.Session:
@@ -128,20 +153,30 @@ def _body_text(element) -> str:
 class Board:
     """감시 대상 게시판의 공통 부분."""
 
-    def __init__(self, board_id: str, name: str, tag: str):
+    def __init__(self, board_id: str, name: str, tag: str,
+                 require_any: list[str] | None = None):
         self.board_id = board_id
         self.name = name
         self.tag = tag  # 메일 제목 앞에 붙는 말
+        # 대회 단어에 더해 이 중 하나가 더 있어야 통과시킨다(없으면 안 건다)
+        self.require_any = list(require_any) if require_any else []
 
     def matches(self, title: str) -> str | None:
-        """제목이 키워드에 걸리면 그 키워드를, 아니면 None을 돌려준다."""
-        normalized = _normalize(title)
-        if any(_normalize(word) in normalized for word in EXCLUDE_KEYWORDS):
+        """제목이 조건에 걸리면 걸린 키워드를, 아니면 None을 돌려준다."""
+        if any(_contains(title, word) for word in EXCLUDE_KEYWORDS):
             return None
-        for keyword in TARGET_KEYWORDS:
-            if _normalize(keyword) in normalized:
-                return keyword
-        return None
+
+        hit = next((k for k in TARGET_KEYWORDS if _contains(title, k)), None)
+        if not hit:
+            return None
+
+        if self.require_any:
+            extra = next((k for k in self.require_any if _contains(title, k)), None)
+            if not extra:
+                return None
+            return hit if extra == hit else f"{hit}+{extra}"
+
+        return hit
 
 
 class UnivBoard(Board):
@@ -277,7 +312,8 @@ BOARDS = [
     UnivBoard(
         board_id="univ-notice",
         name="울산대학교 일반공지",
-        tag="울산대 대회",
+        tag="울산대 SW대회",
+        require_any=SW_KEYWORDS,
         mcode="MN113",
         mgr_seq="35",
     ),
