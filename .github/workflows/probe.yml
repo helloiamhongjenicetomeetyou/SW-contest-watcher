@@ -1,0 +1,29 @@
+# 학교 서버(www.ulsan.ac.kr, ict.ulsan.ac.kr)가 러너에서 되는지 재보는 진단용.
+# 평소에는 안 돌고, Actions 탭에서 손으로 실행할 때만 돈다.
+name: Probe Ulsan
+
+on:
+  workflow_dispatch:
+    inputs:
+      delay:
+        description: "요청 사이 간격(초). 막히면 늘려서 다시 재본다"
+        required: false
+        default: "3"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Probe
+        run: python scripts/probe_ulsan.py "${{ inputs.delay }}"
