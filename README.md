@@ -1,4 +1,4 @@
-# 울산대 SW중심대학 공지 알리미
+# 울산대 SW 대회 공지 알리미
 
 [SW중심대학사업단 공지](https://sw.ulsan.ac.kr/site/swulsan/notices)에 **해커톤·경진대회·공모전 공고가
 새로 올라오면 이메일로** 보내줍니다. GitHub Actions가 2시간마다 돌기 때문에
@@ -60,7 +60,7 @@ Gmail이 아닌 계정으로 보내려면 워크플로에 `SMTP_HOST`, `SMTP_POR
 
 ### 3. 첫 실행
 
-`Actions > UOU Scholarship Watcher > Run workflow`로 한 번 수동 실행합니다.
+`Actions > SW Contest Watcher > Run workflow`로 한 번 수동 실행합니다.
 이때는 메일이 오지 않고 현재 글만 읽음 처리됩니다. 그 다음부터 새 공고에 메일이 옵니다.
 
 ## GitHub Actions에 대해

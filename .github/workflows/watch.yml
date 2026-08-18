@@ -1,4 +1,4 @@
-name: UOU Scholarship Watcher
+name: SW Contest Watcher
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: uou-scholarship-watcher
+  group: sw-contest-watcher
   cancel-in-progress: false
 
 jobs:
@@ -39,7 +39,7 @@ jobs:
       # 합치지 않고 덮어쓰면 이미 보낸 글이 되살아나 메일이 두 번 간다.
       - name: Commit updated state
         run: |
-          git config user.name "uou-scholarship-watcher-bot"
+          git config user.name "sw-contest-watcher-bot"
           git config user.email "actions@users.noreply.github.com"
 
           for attempt in 1 2 3; do
@@ -56,7 +56,7 @@ jobs:
               exit 0
             fi
 
-            git commit --quiet -m "chore: update seen scholarship notices"
+            git commit --quiet -m "chore: update seen notices"
             if git push --quiet origin HEAD:main; then
               echo "state 커밋 완료."
               exit 0
