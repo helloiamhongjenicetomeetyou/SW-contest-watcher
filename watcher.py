@@ -1,12 +1,14 @@
 """
 울산대학교 공지에서 대회·공모전 공고를 찾아 새 글이 올라오면 이메일로 알려주는 스크립트.
 
-두 곳을 본다.
+세 곳을 본다.
 
   1. 대표 홈페이지 일반공지 - 공모전·경진대회·해커톤 공고가 가장 많이 올라온다.
      교외 기관 공고까지 학교가 받아서 올려주는 곳이라 물량이 여기 몰린다.
   2. SW중심대학사업단 공지 - 학내 SW 대회(캡스톤, 프로그래밍 경진대회 등).
      여기만 학교 전산망 밖(CloudFront + 외부 CMS)이라 공개 JSON API로 가져온다.
+  3. U-STEP 비교과프로그램 - 마일리지가 붙는 교내 공모전·해커톤. 공지 게시판에는
+     안 올라오는 것도 있다. 화면을 그리는 AJAX를 그대로 부른다.
 
 학교 서버는 IP당 요청 수를 제한한다. 러너에서 다섯 번째 요청부터 연결이 거절된
 적이 있어서, 대표 홈페이지는 키워드마다 검색하지 않고 목록 두 페이지만 받아
@@ -21,6 +23,7 @@
 
 게시판을 처음 감시할 때는(= state에 그 게시판 기록이 없을 때) 메일을 보내지 않고
 현재 글을 읽음 처리만 한다. 나중에 게시판을 추가해도 과거 글이 쏟아지지 않는다.
+U-STEP만 지금 신청할 수 있는 것만 목록에 남아서 처음부터 메일을 보낸다.
 """
 
 import argparse
@@ -132,8 +135,13 @@ def _build_session() -> requests.Session:
 SESSION = _build_session()
 
 
-def _fetch(url: str, params: dict | None = None, headers: dict | None = None):
-    resp = SESSION.get(url, params=params, headers=headers, timeout=TIMEOUT)
+def _fetch(url: str, params: dict | None = None, headers: dict | None = None,
+           data: dict | None = None):
+    """data를 주면 POST, 아니면 GET. 어느 쪽이든 끝나고 REQUEST_DELAY만큼 쉰다."""
+    if data is None:
+        resp = SESSION.get(url, params=params, headers=headers, timeout=TIMEOUT)
+    else:
+        resp = SESSION.post(url, params=params, data=data, headers=headers, timeout=TIMEOUT)
     resp.raise_for_status()
     time.sleep(REQUEST_DELAY)
     return resp
@@ -150,8 +158,30 @@ def _body_text(element) -> str:
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
+def _rich_text(html: str) -> str:
+    """
+    에디터로 쓴 HTML을 읽을 만한 줄글로 바꾼다.
+
+    글자 몇 개마다 <span>이 따로 붙어 있는 본문이 있다. 태그 사이를 전부 줄바꿈으로
+    두면 '공모 주제' 한 줄이 세 줄로 쪼개진다. 그래서 문단과 표 칸 경계에서만 끊고
+    나머지는 그대로 이어 붙인다.
+    """
+    html = re.sub(r"(?is)<img[^>]*>", " ", html)  # 포스터가 base64로 박혀 있어 먼저 뺀다
+    html = re.sub(r"(?is)<(br|hr)\s*/?>", "\n", html)
+    html = re.sub(r"(?is)</(p|div|li|ol|ul|tr|table|h[1-6])\s*>", "\n", html)
+    html = re.sub(r"(?is)</(td|th)\s*>", " ", html)
+
+    text = BeautifulSoup(html, "html.parser").get_text("").replace("\xa0", " ")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 class Board:
     """감시 대상 게시판의 공통 부분."""
+
+    # 처음 감시할 때도 메일을 보낼지. 게시판은 지난 공고가 그대로 쌓여 있어서
+    # 켜면 과거 글이 쏟아진다. 지금 신청할 수 있는 것만 목록에 남는 곳만 켠다.
+    notify_on_first_run = False
 
     def __init__(self, board_id: str, name: str, tag: str,
                  require_any: list[str] | None = None):
@@ -308,6 +338,195 @@ class SwBoard(Board):
         }
 
 
+class UstepBoard(Board):
+    """
+    비교과통합관리시스템 U-STEP(ustep.ulsan.ac.kr)의 비교과프로그램 목록.
+
+    게시판이 아니라 프로그램 목록이라 '지금 신청할 수 있는 것'만 올라온다.
+    지난 공고가 섞이지 않으므로 처음 감시할 때도 메일을 보낸다.
+
+    화면은 빈 껍데기고 내용은 전부 /controller/homeDefault 한 곳으로 오가는 AJAX로
+    그린다. 그래서 HTML을 긁지 않고 그 엔드포인트를 그대로 부른다. POST에는 CSRF
+    토큰이 필요한데 목록 페이지의 <meta name="csrf-token">에 있다. 세션 쿠키와 짝이라
+    한 번 받아 두고 계속 쓴다. 로그인은 필요 없다.
+
+    한 프로그램(MA_IDX)이 분야·회차별로 SUB_IDX를 여러 개 갖는다. '디지털 콘텐츠 창작
+    공모전'은 영상·시각·인터렉티브 세 분야라 SUB_IDX가 셋이다. 같은 메일을 세 번 받지
+    않도록 MA_IDX와 학기(SUB_TITLE)로 묶어 하나로 보낸다. 다음 학기에 같은 프로그램이
+    다시 열리면 학기가 달라져서 그때 다시 알려준다.
+    """
+
+    notify_on_first_run = True
+
+    BASE = "https://ustep.ulsan.ac.kr"
+    LIST_PAGE = f"{BASE}/home/sub/prog-list"
+    API = f"{BASE}/controller/homeDefault"
+    FILE_API = f"{BASE}/json/file/list"
+
+    def __init__(self, page_size: int = 200, **kwargs):
+        super().__init__(**kwargs)
+        self.page_size = page_size
+        self._csrf: str | None = None
+        # post_id -> 목록에서 알아낸 것(MA_IDX와 SUB_IDX 목록). 상세를 읽을 때 쓴다.
+        self._groups: dict[str, dict] = {}
+
+    def detail_url(self, ma_idx: str, sub_idx: str) -> str:
+        return f"{self.BASE}/home/sub/prog-detail?MA_IDX={ma_idx}&SUB_IDX={sub_idx}"
+
+    def post_url(self, post_id: str) -> str:
+        group = self._groups.get(post_id)
+        if not group:
+            return self.LIST_PAGE
+        return self.detail_url(group["ma_idx"], group["sub_ids"][0])
+
+    def _token(self) -> str:
+        if self._csrf:
+            return self._csrf
+        soup = BeautifulSoup(_fetch(self.LIST_PAGE).text, "html.parser")
+        meta = soup.select_one('meta[name="csrf-token"]')
+        if not meta or not meta.get("content"):
+            raise RuntimeError("U-STEP CSRF 토큰을 찾지 못했습니다. 페이지가 바뀐 것 같습니다.")
+        self._csrf = meta["content"]
+        return self._csrf
+
+    def _headers(self) -> dict:
+        return {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-CSRF-TOKEN": self._token(),
+            "Referer": self.LIST_PAGE,
+        }
+
+    def _api(self, spnm: str, params: dict) -> list[dict]:
+        resp = _fetch(self.API, headers=self._headers(), data={
+            "_spnm": spnm,
+            "sp_param": json.dumps(params, ensure_ascii=False),
+        })
+        return resp.json().get("list") or []
+
+    def fetch_candidates(self) -> dict[str, dict]:
+        # schOption을 option1~3 중 무엇으로 줘도 '진행중'만 온다(option4가 마감된 것).
+        # PAGESIZE를 넉넉히 줘서 한 번에 다 받는다.
+        rows = self._api("PROG_LIST", {
+            "CMD": "LIST",
+            "schType": "",
+            "schText": "",
+            "schOption": "option2",  # 최신순
+            "schSkill": "",
+            "schMile": "",
+            "schInterest": "N",
+            "PAGE": 1,
+            "PAGESIZE": self.page_size,
+            "USER_NO": "",
+            "SVR_TYPE": "REAL",
+            "schDept": "",
+        })
+
+        groups: dict[str, dict] = {}
+        for row in rows:
+            ma_idx = str(row.get("MA_IDX") or "")
+            sub_idx = str(row.get("SUB_IDX") or "")
+            if not ma_idx or not sub_idx:
+                continue
+
+            term = _clean(row.get("SUB_TITLE") or "")
+            post_id = f"{ma_idx}:{term}"
+            group = groups.setdefault(post_id, {
+                "post_id": post_id,
+                "title": _clean(row.get("PG_NM", "")),
+                "date": _clean(row.get("APPLY_DATE") or ""),
+                "ma_idx": ma_idx,
+                "term": term,
+                "sub_ids": [],
+            })
+            group["sub_ids"].append(sub_idx)
+
+        for group in groups.values():
+            group["sub_ids"].sort(key=int)
+
+        self._groups = groups
+        return groups
+
+    def _attachments(self, join_idx: str) -> list[str]:
+        if not join_idx:
+            return []
+        resp = _fetch(self.FILE_API, headers=self._headers(), data={"JOIN_IDX": join_idx})
+        return [_clean(f.get("FILE_NM", "")) for f in (resp.json().get("list") or [])]
+
+    def fetch_detail(self, post_id: str) -> dict:
+        group = self._groups[post_id]
+        ma_idx = group["ma_idx"]
+
+        # LIST1은 같은 내용을 수백 줄씩 돌려준다(서버 쪽 조인 문제). 첫 줄만 쓴다.
+        rows = self._api("PROG_DETAIL", {
+            "CMD": "LIST1", "MA_IDX": ma_idx, "SVR_TYPE": "REAL",
+        })
+        info = rows[0] if rows else {}
+
+        # 분야(회차)마다 한 줄씩. 신청 기간·마일리지는 어느 줄이나 같아서 첫 줄을 쓴다.
+        sessions = []
+        for sub_idx in group["sub_ids"]:
+            found = self._api("PROG_DETAIL", {
+                "CMD": "LIST2", "MA_IDX": ma_idx, "SUB_IDX": sub_idx, "USER_NO": "",
+            })
+            if found:
+                sessions.append((sub_idx, found[0]))
+        first = sessions[0][1] if sessions else {}
+
+        target = self._api("PROG_DETAIL", {"CMD": "LIST3", "MA_IDX": ma_idx})
+        target = target[0] if target else {}
+
+        # 본문에 포스터가 base64로 통째로 박혀 있어서 응답이 1MB를 넘는다.
+        # 메일에는 어차피 못 싣는 것이라 _rich_text가 <img>부터 걷어낸다.
+        posters = self._api("PROG_DETAIL", {"CMD": "POST_INFO", "MA_IDX": ma_idx})
+        content = _rich_text(posters[0].get("POSTER_INFO") or "") if posters else ""
+        if not content.strip():
+            content = "(본문이 이미지로만 되어 있습니다. 링크에서 확인하세요.)"
+
+        extra = []
+        if first.get("APPLY_DATE"):
+            remain = first.get("REMAIN_DAYS")
+            days = f" (D-{remain})" if isinstance(remain, int) and remain >= 0 else ""
+            extra.append(f"신청 기간: {_clean(first['APPLY_DATE'])}{days}")
+        if first.get("SUBJECT_DATE"):
+            extra.append(f"운영 기간: {_clean(first['SUBJECT_DATE'])}")
+        if group["term"]:
+            extra.append(f"학기: {group['term']}")
+        if target:
+            who = " / ".join(
+                _clean(target[key]) for key in ("STU_TARGET_NM", "STU_STATUS_NM") if target.get(key)
+            )
+            if who:
+                extra.append(f"참가 대상: {who}")
+        if first.get("MILEAGE_POINT"):
+            gubun = _clean(first.get("MILEAGE_GUBUN") or "")
+            extra.append(f"마일리지: {(gubun + ' ') if gubun else ''}{_clean(first['MILEAGE_POINT'])}")
+        if info.get("ORG_DIV3") or info.get("ORG_DIV2"):
+            extra.append(f"담당: {_clean(info.get('ORG_DIV3') or info.get('ORG_DIV2'))}")
+        contact = ", ".join(
+            _clean(info[key]) for key in ("HP", "EMAIL") if info.get(key)
+        )
+        if contact:
+            extra.append(f"문의: {contact}")
+
+        # 분야가 여럿이면 분야마다 신청 페이지가 따로 있다. 링크를 다 넣어준다.
+        if len(sessions) > 1:
+            extra.append("분야별 신청:")
+            for sub_idx, row in sessions:
+                subject = _clean(row.get("SUBJECT") or "") or f"SUB_IDX {sub_idx}"
+                extra.append(f"  - {subject}: {self.detail_url(ma_idx, sub_idx)}")
+
+        return {
+            "title": _clean(info.get("PG_NM") or group["title"]),
+            "writer": "",
+            "date": "",  # 작성일이 없는 곳이다. 기간은 extra에 넣었다.
+            "extra": extra,
+            "content": content,
+            "attachments": self._attachments(str(info.get("ATT_FI") or "")),
+            "url": self.post_url(post_id),
+        }
+
+
 BOARDS = [
     UnivBoard(
         board_id="univ-notice",
@@ -321,6 +540,12 @@ BOARDS = [
         board_id="sw-notice",
         name="SW중심대학사업단 공지",
         tag="SW 대회",
+    ),
+    UstepBoard(
+        board_id="ustep-prog",
+        name="U-STEP 비교과프로그램",
+        tag="U-STEP 대회",
+        require_any=SW_KEYWORDS,
     ),
 ]
 
@@ -355,6 +580,8 @@ def format_body(item: dict) -> str:
         lines.append(f"작성자: {item['writer']}")
     if item["date"]:
         lines.append(f"작성일: {item['date']}")
+    # 게시판마다 더 넣고 싶은 줄(U-STEP은 신청 기간·대상·마일리지 같은 것)
+    lines += item.get("extra", [])
     lines.append(f"링크: {item['url']}")
     if item["attachments"]:
         lines.append("첨부파일: " + ", ".join(item["attachments"]))
@@ -405,6 +632,7 @@ def _detail_from_list_row(board: Board, post_id: str, row: dict) -> dict:
         "title": row["title"],
         "writer": "",
         "date": row["date"],
+        "extra": [],
         "content": "(학교 서버 접속이 막혀 본문을 가져오지 못했습니다. 위 링크에서 확인하세요.)",
         "attachments": [],
         "url": board.post_url(post_id),
@@ -476,18 +704,22 @@ def main() -> None:
     failures: list[str] = []
 
     for board in BOARDS:
-        first_run = board.board_id not in state
+        # 지금 열려 있는 것만 목록에 남는 곳은 처음 감시할 때도 그냥 보낸다.
+        # 과거 글이 쏟아질 일이 없고, 오히려 지금 신청할 수 있는 것을 놓치게 된다.
+        silent_first_run = board.board_id not in state and not board.notify_on_first_run
         seen = state.get(board.board_id, set())
 
         # 한쪽 게시판이 죽어도 나머지는 확인하고, 대신 마지막에 종료 코드를 1로 낸다.
         try:
-            new_items, all_ids = collect_new_items(board, seen, with_details=not first_run)
+            new_items, all_ids = collect_new_items(
+                board, seen, with_details=not silent_first_run
+            )
         except Exception as exc:  # noqa: BLE001 - 어떤 실패든 로그만 남기고 계속한다
             print(f"[{board.name}] 수집 실패: {type(exc).__name__}: {exc}")
             failures.append(board.name)
             continue
 
-        if first_run:
+        if silent_first_run:
             state[board.board_id] = all_ids
             print(
                 f"[{board.name}] 최초 감시: 기존 글 {len(all_ids)}건을 읽음 처리했습니다. "
