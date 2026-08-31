@@ -19,7 +19,8 @@
 1. 각 게시판에서 후보 글 목록을 모은다.
 2. 제목이 TARGET_KEYWORDS에 걸리고 state/seen.json에 없는 글이면
    상세 페이지를 읽어 본문·작성일·첨부파일을 가져온다.
-3. 이메일로 발송하고 글 번호를 state/seen.json에 기록한다.
+3. 대상 학년이 적혀 있는데 내 학년(MY_GRADE)이 빠져 있으면 거른다.
+4. 이메일로 발송하고 글 번호를 state/seen.json에 기록한다.
 
 게시판을 처음 감시할 때는(= state에 그 게시판 기록이 없을 때) 메일을 보내지 않고
 현재 글을 읽음 처리만 한다. 나중에 게시판을 추가해도 과거 글이 쏟아지지 않는다.
@@ -82,6 +83,25 @@ SW_KEYWORDS = [
     "게임", "챗봇", "머신러닝", "딥러닝", "캡스톤", "오픈소스", "사물인터넷", "iot",
 ]
 
+# 내 학년. 대상 학년이 적혀 있는데 여기 없으면 메일을 안 보낸다.
+# 진급하면 이 숫자만 바꾸거나 MY_GRADE 환경변수로 넘기면 된다.
+# 0으로 두면 학년을 안 거른다(= 전부 받는다).
+MY_GRADE = int(os.environ.get("MY_GRADE", "1"))
+
+MAX_GRADE = 4  # '3학년 이상'이 몇 학년까지인지
+
+# 학년을 안 가린다는 뜻으로 쓰는 말. 이게 있으면 다른 학년 숫자가 섞여 있어도 통과.
+# '학년전체'는 U-STEP이 대상 학년 칸에 쓰는 값이다.
+ANY_GRADE_PHRASES = [
+    "학년전체", "전학년", "모든학년", "학년무관", "학년제한없음", "학년구분없음",
+    "학년관계없이", "학년상관없이", "누구나", "제한없음",
+]
+
+# 학년 제한은 '참가 대상', '응모 자격' 같은 줄에 적힌다. 본문을 통째로 훑으면
+# '고등학교 3학년 때부터' 같은 말에 걸려 나갈 수 있는 공고까지 빠진다.
+# 그래서 제목과, 이 말이 들어 있는 줄만 본다.
+ELIGIBILITY_LINE_KEYWORDS = ["대상", "자격", "참가", "응모", "신청", "지원"]
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -111,6 +131,66 @@ def _contains(title: str, keyword: str) -> bool:
     if re.fullmatch(r"[a-z0-9]+", keyword):
         return re.search(rf"\b{re.escape(keyword)}\b", title.lower()) is not None
     return _normalize(keyword) in _normalize(title)
+
+
+def _allowed_grades(text: str) -> set[int]:
+    """
+    글에 적힌 대상 학년을 읽어 신청할 수 있는 학년 번호를 모은다.
+
+    학년 얘기가 없으면 빈 집합(= 제한을 못 찾음)을 돌려준다.
+    '2025학년도 2학기'가 4학년으로 읽히면 안 되므로, 앞에 숫자가 붙은 것과
+    '학년도'는 뺀다.
+    """
+    norm = _normalize(text)
+
+    if any(phrase in norm for phrase in ANY_GRADE_PHRASES):
+        return set(range(1, MAX_GRADE + 1))
+
+    grades: set[int] = set()
+
+    # '2~4학년', '2학년~4학년'
+    for lo, hi in re.findall(r"(?<!\d)([1-9])(?:학년)?[~∼\-–—]([1-9])학년(?!도)", norm):
+        grades |= set(range(int(lo), int(hi) + 1))
+
+    # '3학년 이상', '2학년 이하', 그냥 '1학년'
+    for num, tail in re.findall(r"(?<!\d)([1-9])학년(?!도)(이상|이하)?", norm):
+        n = int(num)
+        if tail == "이상":
+            grades |= set(range(n, MAX_GRADE + 1))
+        elif tail == "이하":
+            grades |= set(range(1, n + 1))
+        else:
+            grades.add(n)
+
+    return grades
+
+
+def _grade_reject(text: str) -> str | None:
+    """
+    내 학년이 못 나가는 공고면 그 이유를, 나갈 수 있으면 None을 돌려준다.
+
+    학년 제한을 못 찾으면 통과시킨다. 공고 대부분은 대상 학년을 안 적고,
+    못 읽었다고 빼버리면 나갈 수 있는 대회를 놓친다. 빼는 건 '3학년 이상'처럼
+    내 학년이 아니라고 분명히 적힌 것만.
+    """
+    if MY_GRADE <= 0:
+        return None
+
+    grades = _allowed_grades(text)
+    if not grades or MY_GRADE in grades:
+        return None
+    return "대상 " + ", ".join(f"{g}학년" for g in sorted(grades))
+
+
+def _eligibility_text(detail: dict) -> str:
+    """상세에서 대상 학년이 적혀 있을 만한 부분만 뽑는다."""
+    lines = [detail.get("title") or ""]
+    lines += detail.get("extra") or []
+    lines += [
+        line for line in (detail.get("content") or "").split("\n")
+        if any(word in line for word in ELIGIBILITY_LINE_KEYWORDS)
+    ]
+    return "\n".join(lines)
 
 
 def _build_session() -> requests.Session:
@@ -207,6 +287,10 @@ class Board:
             return hit if extra == hit else f"{hit}+{extra}"
 
         return hit
+
+    def grade_reject(self, detail: dict) -> str | None:
+        """내 학년이 신청할 수 없는 공고면 그 이유를, 아니면 None을 돌려준다."""
+        return _grade_reject(_eligibility_text(detail))
 
 
 class UnivBoard(Board):
@@ -475,6 +559,8 @@ class UstepBoard(Board):
 
         target = self._api("PROG_DETAIL", {"CMD": "LIST3", "MA_IDX": ma_idx})
         target = target[0] if target else {}
+        # '학년전체', '3학년, 4학년이상' 처럼 온다. grade_reject가 이 값을 본다.
+        target_grade = _clean(target.get("STU_TARGET_NM") or "")
 
         # 본문에 포스터가 base64로 통째로 박혀 있어서 응답이 1MB를 넘는다.
         # 메일에는 어차피 못 싣는 것이라 _rich_text가 <img>부터 걷어낸다.
@@ -520,11 +606,22 @@ class UstepBoard(Board):
             "title": _clean(info.get("PG_NM") or group["title"]),
             "writer": "",
             "date": "",  # 작성일이 없는 곳이다. 기간은 extra에 넣었다.
+            "target_grade": target_grade,
             "extra": extra,
             "content": content,
             "attachments": self._attachments(str(info.get("ATT_FI") or "")),
             "url": self.post_url(post_id),
         }
+
+    def grade_reject(self, detail: dict) -> str | None:
+        """
+        U-STEP은 신청 대상 학년이 STU_TARGET_NM 칸에 따로 있다('학년전체',
+        '3학년, 4학년이상'). 포스터 본문보다 이 값이 정확해서 이것만 본다.
+        """
+        target_grade = detail.get("target_grade")
+        if not target_grade:
+            return super().grade_reject(detail)
+        return _grade_reject(target_grade)
 
 
 BOARDS = [
@@ -639,18 +736,22 @@ def _detail_from_list_row(board: Board, post_id: str, row: dict) -> dict:
     }
 
 
-def collect_new_items(board: Board, seen: set, with_details: bool = True) -> tuple[list[dict], set]:
+def collect_new_items(
+    board: Board, seen: set, with_details: bool = True
+) -> tuple[list[dict], set, set]:
     """
-    게시판에서 알림 보낼 글과, 이번에 확인한 전체 글 번호를 돌려준다.
+    게시판에서 알림 보낼 글, 이번에 확인한 전체 글 번호, 학년이 안 맞아 거른
+    글 번호를 돌려준다.
 
     with_details=False면 목록만 읽고 상세는 건너뛴다. 최초 감시 때는 어차피
     메일을 안 보내므로 요청 수를 줄이려고 쓴다.
     """
     candidates = board.fetch_candidates()
     if not with_details:
-        return [], set(candidates)
+        return [], set(candidates), set()
 
     new_items = []
+    skipped_ids: set[str] = set()
     # 본문 수집이 한 번 막히면 그 회차에는 더 두드리지 않는다. 막힌 뒤에도 계속
     # 요청하면 차단만 길어지고, 어차피 링크는 목록에서 이미 알고 있다.
     detail_blocked = False
@@ -676,6 +777,17 @@ def collect_new_items(board: Board, seen: set, with_details: bool = True) -> tup
         if detail is None:
             detail = _detail_from_list_row(board, post_id, row)
 
+        # 대상 학년이 적혀 있는데 내 학년이 빠져 있으면 보내지 않는다.
+        # 본문을 못 읽었을 때는 학년도 알 수 없어서 그냥 통과한다.
+        reject = board.grade_reject(detail)
+        if reject:
+            print(
+                f"[{board.name}] {MY_GRADE}학년이 못 나가는 공고라 건너뜁니다"
+                f"({reject}): {detail.get('title') or row['title']}"
+            )
+            skipped_ids.add(post_id)
+            continue
+
         detail.update(
             keyword=keyword,
             post_id=post_id,
@@ -687,17 +799,28 @@ def collect_new_items(board: Board, seen: set, with_details: bool = True) -> tup
             detail["title"] = row["title"]
         new_items.append(detail)
 
-    return new_items, set(candidates)
+    return new_items, set(candidates), skipped_ids
 
 
 def main() -> None:
+    global MY_GRADE  # --grade로 이번 실행에만 바꿀 수 있다
+
     parser = argparse.ArgumentParser(description="울산대 대회·공모전 공지 감시")
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="메일을 보내지 않고 무엇이 걸렸는지 화면에만 출력한다(state도 건드리지 않음).",
     )
+    parser.add_argument(
+        "--grade",
+        type=int,
+        metavar="N",
+        help="내 학년을 이번 실행에만 바꾼다. 0이면 학년을 안 거른다(기본값은 MY_GRADE).",
+    )
     args = parser.parse_args()
+
+    if args.grade is not None:
+        MY_GRADE = args.grade
 
     state = load_state()
     items_to_send: list[dict] = []
@@ -711,7 +834,7 @@ def main() -> None:
 
         # 한쪽 게시판이 죽어도 나머지는 확인하고, 대신 마지막에 종료 코드를 1로 낸다.
         try:
-            new_items, all_ids = collect_new_items(
+            new_items, all_ids, skipped_ids = collect_new_items(
                 board, seen, with_details=not silent_first_run
             )
         except Exception as exc:  # noqa: BLE001 - 어떤 실패든 로그만 남기고 계속한다
@@ -726,6 +849,11 @@ def main() -> None:
                 "(메일 발송 없음)"
             )
             continue
+
+        # 학년이 안 맞아 거른 글은 읽음 처리해 둔다. 안 그러면 두 시간마다
+        # 같은 글의 본문을 다시 읽어서 학교 서버에 괜한 요청을 넣는다.
+        if skipped_ids:
+            state.setdefault(board.board_id, set()).update(skipped_ids)
 
         if not new_items:
             print(f"[{board.name}] 새로운 공지가 없습니다.")

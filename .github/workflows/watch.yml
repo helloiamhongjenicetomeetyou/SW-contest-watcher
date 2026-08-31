@@ -29,6 +29,9 @@ jobs:
 
       - name: Run watcher
         env:
+          # 내 학년. 대상 학년이 적혀 있는데 여기 없는 공고는 메일을 안 보낸다.
+          # 진급하면 이 숫자만 올린다. 0으로 두면 학년을 안 거른다.
+          MY_GRADE: "1"
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
