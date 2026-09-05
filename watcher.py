@@ -1,5 +1,5 @@
 """
-울산대학교 공지에서 대회·공모전 공고를 찾아 새 글이 올라오면 이메일로 알려주는 스크립트.
+울산대학교 공지에서 대회·공모전과 장학 공고를 찾아 새 글이 올라오면 이메일로 알려주는 스크립트.
 
 세 곳을 본다.
 
@@ -10,6 +10,10 @@
   3. U-STEP 비교과프로그램 - 마일리지가 붙는 교내 공모전·해커톤. 공지 게시판에는
      안 올라오는 것도 있다. 화면을 그리는 AJAX를 그대로 부른다.
 
+찾는 것은 두 가지다. '대회'는 대회·공모전·해커톤, '장학'은 장학금·학자금 공고다.
+어느 게시판에서 어느 분야를 볼지는 BOARDS에서 게시판마다 따로 정한다. 한 글이 둘 다에
+걸리면 먼저 적은 분야로 한 통만 보낸다.
+
 학교 서버는 IP당 요청 수를 제한한다. 러너에서 다섯 번째 요청부터 연결이 거절된
 적이 있어서, 대표 홈페이지는 키워드마다 검색하지 않고 목록 두 페이지만 받아
 제목을 직접 거른다. 목록 2페이지면 나흘치라 2시간 주기로는 넉넉하다.
@@ -17,7 +21,7 @@
 
 동작 방식:
 1. 각 게시판에서 후보 글 목록을 모은다.
-2. 제목이 TARGET_KEYWORDS에 걸리고 state/seen.json에 없는 글이면
+2. 제목이 감시 분야(대회·장학) 중 하나에 걸리고 state/seen.json에 없는 글이면
    상세 페이지를 읽어 본문·작성일·첨부파일을 가져온다.
 3. 대상 학년이 적혀 있는데 내 학년(MY_GRADE)이 빠져 있으면 거른다.
 4. 이메일로 발송하고 글 번호를 state/seen.json에 기록한다.
@@ -51,9 +55,9 @@ TIMEOUT = (15, 30)
 # 요청 사이 간격. 학교 서버는 짧은 시간에 요청이 몰리면 연결 자체를 거절한다.
 REQUEST_DELAY = 3.0
 
-# 제목에 이 중 하나라도 들어 있으면 알림 대상. 띄어쓰기와 대소문자는 무시하고 비교한다.
-# 장학 공고까지 받고 싶으면 "장학"을 넣으면 된다.
-TARGET_KEYWORDS = [
+# 대회 분야. 제목에 이 중 하나라도 들어 있으면 알림 대상.
+# 띄어쓰기와 대소문자는 무시하고 비교한다.
+CONTEST_KEYWORDS = [
     "대회",
     "공모전",
     "공모",
@@ -69,11 +73,28 @@ TARGET_KEYWORDS = [
 ]
 
 # 위 키워드에 걸려도 이미 끝난 소식은 뺀다. 남의 수상 소식까지 받을 이유는 없다.
-EXCLUDE_KEYWORDS = ["수상자", "명단", "최종 결과", "결과 안내", "개최 취소"]
+CONTEST_EXCLUDE = ["수상자", "명단", "최종 결과", "결과 안내", "개최 취소"]
+
+# 장학 분야. '장학' 하나로 장학금·장학생·근로장학·교외 장학재단 공고가 다 걸린다.
+# '등록금'은 단독으로 두면 납부·환불·분할 안내까지 딸려와서 '지원'이 붙은 것만 본다.
+SCHOLARSHIP_KEYWORDS = [
+    "장학",
+    "학자금",
+    "국가근로",
+    "등록금 지원",
+    "학비 지원",
+    "생활비 지원",
+]
+
+# 선발이 끝난 뒤의 소식은 뺀다. 명단이나 지급 공지에는 내가 신청할 게 없다.
+SCHOLARSHIP_EXCLUDE = [
+    "수혜자", "선발 결과", "선발자", "명단", "결과 안내", "지급 완료", "환수",
+]
 
 # 대표 홈페이지에는 교외 기관 공고가 그대로 올라와서 '한우 곤포 나르기 대회',
 # '댄스 경연대회' 같은 것까지 섞인다. 그래서 그 게시판만 대회 단어에 더해
 # 이 중 하나가 제목에 있어야 알림을 보낸다. SW사업단 게시판은 전부 SW 대회라 안 건다.
+# 대회에만 거는 조건이다. 장학은 SW 장학만 받을 이유가 없어서 이것 없이 다 받는다.
 SW_KEYWORDS = [
     "ai", "인공지능", "sw", "소프트웨어", "프로그래밍", "코딩", "코테",
     "해커톤", "hackathon", "데이터", "빅데이터", "알고리즘",
@@ -256,6 +277,60 @@ def _rich_text(html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+class Category:
+    """
+    무엇을 찾을지. 어디서 찾을지(게시판)와 따로 둔다.
+
+    게시판을 하나 더 붙이는 일과 찾는 분야를 하나 더 늘리는 일은 서로 다르다.
+    키워드 묶음에 이름을 붙여 두고 게시판과 짝지어 쓴다.
+    """
+
+    def __init__(self, key: str, name: str, keywords: list[str], exclude: list[str]):
+        self.key = key      # 명령줄 --only에 적는 이름
+        self.name = name    # 메일 본문에 적는 이름
+        self.keywords = keywords
+        self.exclude = exclude
+
+    def matches(self, title: str) -> str | None:
+        """제목이 이 분야에 걸리면 걸린 키워드를, 아니면 None을 돌려준다."""
+        if any(_contains(title, word) for word in self.exclude):
+            return None
+        return next((k for k in self.keywords if _contains(title, k)), None)
+
+
+CONTEST = Category("contest", "대회·공모전", CONTEST_KEYWORDS, CONTEST_EXCLUDE)
+SCHOLARSHIP = Category("scholarship", "장학", SCHOLARSHIP_KEYWORDS, SCHOLARSHIP_EXCLUDE)
+
+CATEGORIES = [CONTEST, SCHOLARSHIP]
+
+
+class Watch:
+    """
+    게시판 하나에서 한 분야를 찾는 조건. (게시판 × 분야) 하나가 감시 단위다.
+
+    같은 분야라도 게시판마다 조건이 다르다. 대회는 대표 홈페이지·U-STEP에서만
+    SW 조건을 더 걸고, 전부 SW 대회인 SW사업단 게시판에는 안 건다.
+    """
+
+    def __init__(self, category: Category, tag: str,
+                 require_any: list[str] | None = None):
+        self.category = category
+        self.tag = tag  # 메일 제목 앞에 붙는 말
+        # 분야 단어에 더해 이 중 하나가 더 있어야 통과시킨다(없으면 안 건다)
+        self.require_any = list(require_any) if require_any else []
+
+    def matches(self, title: str) -> str | None:
+        """제목이 조건에 걸리면 걸린 키워드를, 아니면 None을 돌려준다."""
+        hit = self.category.matches(title)
+        if not hit or not self.require_any:
+            return hit
+
+        extra = next((k for k in self.require_any if _contains(title, k)), None)
+        if not extra:
+            return None
+        return hit if extra == hit else f"{hit}+{extra}"
+
+
 class Board:
     """감시 대상 게시판의 공통 부분."""
 
@@ -263,30 +338,23 @@ class Board:
     # 켜면 과거 글이 쏟아진다. 지금 신청할 수 있는 것만 목록에 남는 곳만 켠다.
     notify_on_first_run = False
 
-    def __init__(self, board_id: str, name: str, tag: str,
-                 require_any: list[str] | None = None):
+    def __init__(self, board_id: str, name: str, watches: list[Watch]):
         self.board_id = board_id
         self.name = name
-        self.tag = tag  # 메일 제목 앞에 붙는 말
-        # 대회 단어에 더해 이 중 하나가 더 있어야 통과시킨다(없으면 안 건다)
-        self.require_any = list(require_any) if require_any else []
+        self.watches = watches  # 이 게시판에서 볼 분야들
 
-    def matches(self, title: str) -> str | None:
-        """제목이 조건에 걸리면 걸린 키워드를, 아니면 None을 돌려준다."""
-        if any(_contains(title, word) for word in EXCLUDE_KEYWORDS):
-            return None
+    def matches(self, title: str) -> tuple[Watch, str] | None:
+        """
+        제목이 이 게시판에서 보는 분야에 걸리면 (분야, 걸린 키워드)를 돌려준다.
 
-        hit = next((k for k in TARGET_KEYWORDS if _contains(title, k)), None)
-        if not hit:
-            return None
-
-        if self.require_any:
-            extra = next((k for k in self.require_any if _contains(title, k)), None)
-            if not extra:
-                return None
-            return hit if extra == hit else f"{hit}+{extra}"
-
-        return hit
+        둘 다에 걸리는 글이 있다('AI 장학생 선발 경진대회'). 같은 글로 메일이
+        두 통 가지 않게 BOARDS에 먼저 적은 분야로 한 통만 보낸다.
+        """
+        for watch in self.watches:
+            hit = watch.matches(title)
+            if hit:
+                return watch, hit
+        return None
 
     def grade_reject(self, detail: dict) -> str | None:
         """내 학년이 신청할 수 없는 공고면 그 이유를, 아니면 None을 돌려준다."""
@@ -628,21 +696,27 @@ BOARDS = [
     UnivBoard(
         board_id="univ-notice",
         name="울산대학교 일반공지",
-        tag="울산대 SW대회",
-        require_any=SW_KEYWORDS,
+        watches=[
+            Watch(CONTEST, tag="울산대 SW대회", require_any=SW_KEYWORDS),
+            # 교내 장학뿐 아니라 교외 장학재단 공고도 학교가 받아서 여기 올려준다.
+            Watch(SCHOLARSHIP, tag="울산대 장학"),
+        ],
         mcode="MN113",
         mgr_seq="35",
     ),
     SwBoard(
         board_id="sw-notice",
         name="SW중심대학사업단 공지",
-        tag="SW 대회",
+        watches=[
+            Watch(CONTEST, tag="SW 대회"),
+            Watch(SCHOLARSHIP, tag="SW 장학"),
+        ],
     ),
     UstepBoard(
         board_id="ustep-prog",
         name="U-STEP 비교과프로그램",
-        tag="U-STEP 대회",
-        require_any=SW_KEYWORDS,
+        # 게시판이 아니라 비교과 프로그램 목록이라 장학 공고는 안 올라온다.
+        watches=[Watch(CONTEST, tag="U-STEP 대회", require_any=SW_KEYWORDS)],
     ),
 ]
 
@@ -670,6 +744,7 @@ def save_state(state: dict[str, set]) -> None:
 def format_body(item: dict) -> str:
     lines = [
         f"게시판: {item['board_name']}",
+        f"분야: {item['category']}",
         f"걸린 키워드: {item['keyword']}",
         f"제목: {item['title']}",
     ]
@@ -759,9 +834,10 @@ def collect_new_items(
     for post_id, row in candidates.items():
         if post_id in seen:
             continue
-        keyword = board.matches(row["title"])
-        if not keyword:
+        matched = board.matches(row["title"])
+        if not matched:
             continue
+        watch, keyword = matched
 
         detail = None
         if not detail_blocked:
@@ -790,10 +866,11 @@ def collect_new_items(
 
         detail.update(
             keyword=keyword,
+            category=watch.category.name,
             post_id=post_id,
             board_id=board.board_id,
             board_name=board.name,
-            board_tag=board.tag,
+            board_tag=watch.tag,
         )
         if not detail["title"]:
             detail["title"] = row["title"]
@@ -805,7 +882,7 @@ def collect_new_items(
 def main() -> None:
     global MY_GRADE  # --grade로 이번 실행에만 바꿀 수 있다
 
-    parser = argparse.ArgumentParser(description="울산대 대회·공모전 공지 감시")
+    parser = argparse.ArgumentParser(description="울산대 대회·공모전·장학 공지 감시")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -817,16 +894,32 @@ def main() -> None:
         metavar="N",
         help="내 학년을 이번 실행에만 바꾼다. 0이면 학년을 안 거른다(기본값은 MY_GRADE).",
     )
+    parser.add_argument(
+        "--only",
+        metavar="분야",
+        choices=[category.key for category in CATEGORIES],
+        help="한 분야만 확인한다(" + " / ".join(c.key for c in CATEGORIES)
+             + "). 키워드를 손보고 무엇이 걸리는지 볼 때 쓴다.",
+    )
     args = parser.parse_args()
 
     if args.grade is not None:
         MY_GRADE = args.grade
+
+    if args.only:
+        # 이번 실행에서만 다른 분야를 뺀다. 볼 분야가 하나도 안 남은 게시판은
+        # 아래에서 통째로 건너뛴다(괜한 요청을 안 넣는다).
+        for board in BOARDS:
+            board.watches = [w for w in board.watches if w.category.key == args.only]
 
     state = load_state()
     items_to_send: list[dict] = []
     failures: list[str] = []
 
     for board in BOARDS:
+        if not board.watches:
+            continue
+
         # 지금 열려 있는 것만 목록에 남는 곳은 처음 감시할 때도 그냥 보낸다.
         # 과거 글이 쏟아질 일이 없고, 오히려 지금 신청할 수 있는 것을 놓치게 된다.
         silent_first_run = board.board_id not in state and not board.notify_on_first_run
